@@ -1,38 +1,71 @@
+import os
+import logging
+import google.generativeai as genai
+
 from graph.queries import get_interaction
-from rag.explain import explain_interaction
-from agent.rules import infer_severity
+from rag.retrieve import retrieve_interaction_text
 from agent.schema import InteractionResult
 
-DISCLAIMER = "This information is for educational purposes only and is not medical advice."
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 
-def safety_agent(drug_a, drug_b):
-    drug_a = drug_a.lower().strip()
-    drug_b = drug_b.lower().strip()
+# Configure Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-    # 1️⃣ Knowledge Graph Gate
+EXPLANATION_PROMPT = """
+You are a medical explanation assistant.
+
+Rewrite the VERIFIED FACTS below into simple,
+human-readable language.
+
+Rules:
+- Do NOT add new medical facts
+- Do NOT guess severity or mechanism
+- Do NOT give medical advice
+- If evidence is missing, state that clearly
+
+VERIFIED FACTS:
+{facts}
+"""
+
+def safety_agent(drug_a: str, drug_b: str) -> InteractionResult:
     interaction = get_interaction(drug_a, drug_b)
 
-    if not interaction:
-        return InteractionResult(
-            drug_pair=[drug_a, drug_b],
-            interaction_exists=False,
-            severity=None,
-            explanation=None,
-            source="DDInter Knowledge Graph",
-            disclaimer=DISCLAIMER
+    interaction_exists = interaction is not None
+    severity = "unknown"
+
+    evidence = retrieve_interaction_text(drug_a, drug_b)
+
+    facts = {
+        "drug_pair": [drug_a, drug_b],
+        "interaction_exists": interaction_exists,
+        "severity": severity,
+        "evidence": evidence
+    }
+
+    try:
+        response = model.generate_content(
+            EXPLANATION_PROMPT.format(facts=facts)
         )
+        explanation = response.text.strip()
 
-    # 2️⃣ Severity Rules
-    severity = infer_severity(drug_a, drug_b)
+    except Exception as e:
+        logging.error(f"Gemini explanation failed: {e}")
 
-    # 3️⃣ Explanation (Controlled)
-    explanation = explain_interaction(drug_a, drug_b)
+        explanation = (
+            f"{drug_a.capitalize()} and {drug_b.capitalize()} are known to interact "
+            "according to curated drug–drug interaction databases. "
+            "No detailed explanation was available at this time. "
+            "This information is provided for educational purposes only and "
+            "is not medical advice."
+        )
 
     return InteractionResult(
         drug_pair=[drug_a, drug_b],
-        interaction_exists=True,
+        interaction_exists=interaction_exists,
         severity=severity,
         explanation=explanation,
         source="DDInter + RAG",
-        disclaimer=DISCLAIMER
+        disclaimer="This information is for educational purposes only and is not medical advice."
     )
